@@ -37,6 +37,7 @@ cli_deployment_vars:
   gcp_public_cidrs_access_enabled: true
   k8s_service_account_name: "{{ k8s_service_account_name}}"
   num_node_pools: "{{ num_node_pools }}"
+  force_destroy_buckets: true
 custom_vars:
   project: "{{ project }}"
 post_deploy_tests:

@@ -49,6 +49,8 @@ vars:
   # The GCP Project ID hosting the reservation. Set to owner project id if using a shared reservation.
   reservation_project_id: $(vars.project_id)
 
+  force_destroy_buckets: false
+
   # Installs NCCL library and Google NCCL plugin
   # Runs an init container on all GB200 GPU nodes with the NCCL plugin image
   gib_installer_path: $(ghpc_stage("./nccl-installer.yaml.tftpl"))
@@ -137,7 +139,7 @@ deployment_groups:
       local_mount: /training-data
       name_prefix: training
       random_suffix: true
-      force_destroy: false
+      force_destroy: $(vars.force_destroy_buckets)
       enable_hierarchical_namespace: true
 
   - id: checkpoint_bucket
@@ -146,7 +148,7 @@ deployment_groups:
       local_mount: /checkpoint-data
       name_prefix: checkpoint
       random_suffix: true
-      force_destroy: false
+      force_destroy: $(vars.force_destroy_buckets)
       enable_hierarchical_namespace: true
 
   - id: a4x-cluster

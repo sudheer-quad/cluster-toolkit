@@ -51,7 +51,18 @@ vars:
   version_prefix: "1.35."
 
   auto_monitoring_scope: "NONE"
+  
+  kueue_configuration_path: $(ghpc_stage("./kueue-configuration.yaml.tftpl"))
+  gib_installer_path: $(ghpc_stage("./nccl-installer.yaml.tftpl"))
+  system_node_pool_disk_size_gb: 200
+  a4_node_pool_disk_size_gb: 100
+  accelerator_type: nvidia-b200
+  version_prefix: "1.35."
 
+  auto_monitoring_scope: "NONE"
+
+  force_destroy_buckets: false
+    
   enable_inference_gateway: false
 
   # # To enable Managed-Lustre please uncomment this section and fill out the settings.
@@ -141,7 +152,7 @@ deployment_groups:
       local_mount: /training-data
       name_prefix: training
       random_suffix: true
-      force_destroy: false
+      force_destroy: $(vars.force_destroy_buckets)
       enable_hierarchical_namespace: true
 
   - id: checkpoint_bucket
@@ -150,7 +161,7 @@ deployment_groups:
       local_mount: /checkpoint-data
       name_prefix: checkpoint
       random_suffix: true
-      force_destroy: false
+      force_destroy: $(vars.force_destroy_buckets)
       enable_hierarchical_namespace: true
 
   - id: a4-cluster
