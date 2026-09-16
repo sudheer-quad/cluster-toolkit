@@ -15,11 +15,14 @@
 package cluster
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"hpc-toolkit/pkg/logging"
 	"hpc-toolkit/pkg/orchestrator/gke"
 	"hpc-toolkit/pkg/shell"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -29,6 +32,8 @@ var (
 	location    string
 	projectID   string
 )
+
+var executeCmdWithTimeoutFunc = shell.ExecuteCommandWithTimeout
 
 var gkeOrchestratorFactory = func() *gke.GKEOrchestrator {
 	return gke.NewGKEOrchestrator()
@@ -45,7 +50,15 @@ var ClusterCmd = &cobra.Command{
 		orc = gkeOrchestratorFactory()
 
 		if projectID == "" {
-			result := shell.ExecuteCommand("gcloud", "config", "get-value", "project")
+
+			timeoutDuration := 10 * time.Second
+
+			result := executeCmdWithTimeoutFunc(timeoutDuration, "gcloud", "config", "get-value", "project")
+
+			if result.Err != nil && (errors.Is(result.Err, context.DeadlineExceeded) || result.Err.Error() == "signal: killed") {
+				return fmt.Errorf("gcloud config get-value project timed out after %v. Please check your network connection", timeoutDuration)
+			}
+
 			ambientProject := strings.TrimSpace(result.Stdout)
 
 			if result.ExitCode != 0 || ambientProject == "" {

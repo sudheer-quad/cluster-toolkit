@@ -16,10 +16,12 @@ package gke
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"hpc-toolkit/pkg/orchestrator"
 	"hpc-toolkit/pkg/shell"
@@ -34,6 +36,16 @@ func (m *mockExecutor) ExecuteCommand(name string, args ...string) shell.Command
 		return m.executeCommandFunc(name, args...)
 	}
 	return shell.CommandResult{ExitCode: 0}
+}
+
+func (m *mockExecutor) ExecuteCommandWithTimeout(timeout time.Duration, name string, args ...string) shell.CommandResult {
+	if timeout < time.Millisecond {
+		return shell.CommandResult{
+			Err:      context.DeadlineExceeded,
+			ExitCode: -1,
+		}
+	}
+	return m.ExecuteCommand(name, args...)
 }
 
 func (m *mockExecutor) ExecuteCommandStream(name string, args ...string) error {
