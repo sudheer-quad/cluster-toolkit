@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hpc-toolkit/pkg/config"
 	"hpc-toolkit/pkg/imagebuilder"
@@ -509,11 +510,18 @@ func (g *GKEOrchestrator) ApplyManifest(manifestContent, outputManifestPath, wor
 func (g *GKEOrchestrator) Initialize(clusterName, location, projectID string) (string, error) {
 	g.projectID = projectID
 
+	timeoutDuration := 10 * time.Second
+
 	logging.Info("Fetching GKE cluster metadata for '%s'...", clusterName)
-	res := g.executor.ExecuteCommand("gcloud", "container", "clusters", "describe", clusterName,
+	res := g.executor.ExecuteCommandWithTimeout(timeoutDuration, "gcloud", "container", "clusters", "describe", clusterName,
 		"--location", location,
 		"--project", g.projectID,
 		"--format=json")
+
+	if res.Err != nil && (errors.Is(res.Err, context.DeadlineExceeded) || res.Err.Error() == "signal: killed") {
+		return "", fmt.Errorf("timed out after %v while trying to reach GKE cluster '%s' in '%s'. Please check your network connection", timeoutDuration, clusterName, location)
+	}
+
 	if res.ExitCode != 0 {
 		if strings.Contains(res.Stderr, "403") || strings.Contains(strings.ToLower(res.Stderr), "permission denied") {
 			return "", fmt.Errorf("your account lacks the required permission to access cluster '%s' in project '%s'. Please ask your project administrator to grant you the Kubernetes Engine Viewer role (roles/container.viewer)", clusterName, g.projectID)
@@ -522,10 +530,15 @@ func (g *GKEOrchestrator) Initialize(clusterName, location, projectID string) (s
 		if len(strings.Split(location, "-")) == 3 {
 			region := shell.ExtractRegion(location)
 			logging.Info("Failed to find cluster in zone %s. Trying fallback to region %s...", location, region)
-			fallbackRes := g.executor.ExecuteCommand("gcloud", "container", "clusters", "describe", clusterName,
+			fallbackRes := g.executor.ExecuteCommandWithTimeout(timeoutDuration, "gcloud", "container", "clusters", "describe", clusterName,
 				"--location", region,
 				"--project", g.projectID,
 				"--format=json")
+
+			if fallbackRes.Err != nil && (errors.Is(fallbackRes.Err, context.DeadlineExceeded) || fallbackRes.Err.Error() == "signal: killed") {
+				return "", fmt.Errorf("timed out after %v while trying to reach fallback GKE cluster '%s' in region '%s'. Please check your network connection", timeoutDuration, clusterName, region)
+			}
+
 			if fallbackRes.ExitCode == 0 {
 				logging.Warn("Cluster '%s' is a regional cluster in '%s'. Found it by falling back from zone '%s'. "+
 					"Note: This does NOT restrict your job to '%s'. To run specifically in '%s', "+
@@ -2377,6 +2390,10 @@ func (d *DefaultKubeClient) ListJobSets(namespace string, labelSelector string) 
 
 func (d *DefaultExecutor) ExecuteCommand(name string, args ...string) shell.CommandResult {
 	return shell.ExecuteCommand(name, args...)
+}
+
+func (d *DefaultExecutor) ExecuteCommandWithTimeout(timeout time.Duration, name string, args ...string) shell.CommandResult {
+	return shell.ExecuteCommandWithTimeout(timeout, name, args...)
 }
 
 func (d *DefaultExecutor) ExecuteCommandStream(name string, args ...string) error {

@@ -19,6 +19,7 @@ package shell
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"fmt"
 	"hpc-toolkit/pkg/config"
@@ -27,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -43,6 +45,7 @@ type CommandResult struct {
 	Stdout   string
 	Stderr   string
 	ExitCode int
+	Err      error
 }
 
 // Command represents a shell command that can be executed.
@@ -228,4 +231,38 @@ func ExtractRegion(location string) string {
 		return parts[0] + "-" + parts[1]
 	}
 	return location
+}
+
+// ExecuteCommandWithTimeout executes a shell command but forcibly kills the
+// process if it does not complete within the provided timeout duration.
+func ExecuteCommandWithTimeout(timeout time.Duration, name string, args ...string) CommandResult {
+	// Create a context that automatically cancels after the timeout
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	err := cmd.Run()
+
+	result := CommandResult{
+		Stdout: stdoutBuf.String(),
+		Stderr: stderrBuf.String(),
+		Err:    err,
+	}
+
+	if err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			result.ExitCode = exitError.ExitCode()
+		} else {
+			result.ExitCode = -1
+		}
+	} else {
+		result.ExitCode = 0
+	}
+
+	return result
 }
