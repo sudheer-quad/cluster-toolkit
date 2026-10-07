@@ -16,10 +16,12 @@ package cluster
 
 import (
 	"bytes"
+	"context"
 	"hpc-toolkit/pkg/orchestrator/gke"
 	"hpc-toolkit/pkg/shell"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -70,6 +72,59 @@ func TestDescribeCmd_Success(t *testing.T) {
 	}
 }
 
+func TestClusterCmd_AmbientProjectResolution(t *testing.T) {
+	oldFactory := gkeOrchestratorFactory
+	defer func() { gkeOrchestratorFactory = oldFactory }()
+
+	gkeOrchestratorFactory = func() *gke.GKEOrchestrator {
+		g := gke.NewGKEOrchestrator()
+		g.SetExecutor(&mockClusterExecutor{})
+		return g
+	}
+
+	origExecWithTimeout := shell.ExecuteCommandWithTimeout
+	defer func() { shell.ExecuteCommandWithTimeout = origExecWithTimeout }()
+
+	t.Run("Resolves ambient project from gcloud config", func(t *testing.T) {
+		resetClusterCmdFlags()
+
+		shell.ExecuteCommandWithTimeout = func(timeout time.Duration, name string, args ...string) shell.CommandResult {
+			if name == "gcloud" && strings.Join(args, " ") == "config get-value project" {
+				return shell.CommandResult{ExitCode: 0, Stdout: "ambient-test-project\n"}
+			}
+			return shell.CommandResult{ExitCode: 1}
+		}
+
+		output, err := executeCommand(ClusterCmd, "describe", "--cluster", "test-cluster", "--location", "us-central1-a")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if projectID != "ambient-test-project" {
+			t.Errorf("expected projectID to be 'ambient-test-project', got %q", projectID)
+		}
+		if !strings.Contains(output, "status: RUNNING") {
+			t.Errorf("expected output to contain status: RUNNING, got %s", output)
+		}
+	})
+
+	t.Run("Returns error when gcloud config get-value project times out", func(t *testing.T) {
+		resetClusterCmdFlags()
+
+		shell.ExecuteCommandWithTimeout = func(timeout time.Duration, name string, args ...string) shell.CommandResult {
+			return shell.CommandResult{ExitCode: 124, Err: context.DeadlineExceeded}
+		}
+
+		_, err := executeCommand(ClusterCmd, "describe", "--cluster", "test-cluster", "--location", "us-central1-a")
+		if err == nil {
+			t.Fatal("expected timeout error, got nil")
+		}
+		wantSubstr := "gcloud config get-value project timed out after"
+		if !strings.Contains(err.Error(), wantSubstr) {
+			t.Errorf("expected error containing %q, got: %v", wantSubstr, err)
+		}
+	})
+}
+
 func resetClusterCmdFlags() {
 	clusterName = ""
 	location = ""
@@ -112,6 +167,10 @@ func (m *mockClusterExecutor) ExecuteCommand(name string, args ...string) shell.
 		}
 	}
 	return shell.CommandResult{ExitCode: 0, Stdout: "{}"} // Default to empty object JSON
+}
+
+func (m *mockClusterExecutor) ExecuteCommandWithTimeout(_ time.Duration, name string, args ...string) shell.CommandResult {
+	return m.ExecuteCommand(name, args...)
 }
 
 func (m *mockClusterExecutor) ExecuteCommandStream(name string, args ...string) error {
