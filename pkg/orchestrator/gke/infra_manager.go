@@ -337,7 +337,6 @@ func (g *GKEOrchestrator) removeDescriptionFields(data map[interface{}]interface
 // ValidateClusterState runs all cluster-specific validations to fail early on invalid state.
 func (g *GKEOrchestrator) ValidateClusterState(job *orchestrator.JobDefinition) error {
 	validators := []func() error{
-		func() error { return g.checkClusterConnectivity(job.ClusterName) },
 		func() error {
 			return g.validateTargetNamespaceExists(job.ClusterName, job.ClusterLocation, job.ProjectID)
 		},
@@ -346,10 +345,17 @@ func (g *GKEOrchestrator) ValidateClusterState(job *orchestrator.JobDefinition) 
 	}
 
 	if job.PriorityClassName != "" {
-		validators = append(validators,
-			func() error { return g.ensurePriorityClassesInstalled() },
-			func() error { return g.validatePriorityClass(job.PriorityClassName) },
-		)
+		validators = append(validators, func() error {
+			existing, listErr := g.getClusterPriorityClasses()
+			installed, err := g.ensurePriorityClassesInstalled(existing, listErr)
+			if err != nil {
+				return err
+			}
+			if installed {
+				existing, listErr = g.getClusterPriorityClasses()
+			}
+			return g.validatePriorityClass(job.PriorityClassName, existing, listErr)
+		})
 	}
 
 	for _, validate := range validators {
@@ -483,7 +489,7 @@ func (g *GKEOrchestrator) configureClusterEnvironment(job *orchestrator.JobDefin
 		return err
 	}
 
-	localQueue, err := g.resolveKueueQueue(job.KueueQueueName, ns)
+	localQueue, discovered, err := g.resolveKueueQueue(job.KueueQueueName, ns)
 	if err != nil {
 		if job.DryRunManifest == "" {
 			return err
@@ -494,9 +500,12 @@ func (g *GKEOrchestrator) configureClusterEnvironment(job *orchestrator.JobDefin
 	job.KueueQueueName = localQueue
 
 	if job.DryRunManifest == "" {
-		exists, err := g.checkLocalQueueExists(localQueue, ns)
-		if err != nil {
-			return fmt.Errorf("failed to check if LocalQueue exists: %w", err)
+		exists := discovered
+		if !exists {
+			exists, err = g.checkLocalQueueExists(localQueue, ns)
+			if err != nil {
+				return fmt.Errorf("failed to check if LocalQueue exists: %w", err)
+			}
 		}
 		if !exists {
 			availableQueues := g.listLocalQueues(ns)

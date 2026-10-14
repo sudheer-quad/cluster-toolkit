@@ -143,25 +143,28 @@ func TestCreateDefaultQueues_CustomNamespace(t *testing.T) {
 
 func TestResolveKueueQueue(t *testing.T) {
 	tests := []struct {
-		name          string
-		requestedName string
-		kubectlOutput string
-		wantName      string
-		wantErr       bool
+		name           string
+		requestedName  string
+		kubectlOutput  string
+		wantName       string
+		wantDiscovered bool
+		wantErr        bool
 	}{
 		{
-			name:          "User requested name",
-			requestedName: "custom-q",
-			kubectlOutput: "",
-			wantName:      "custom-q",
-			wantErr:       false,
+			name:           "User requested name",
+			requestedName:  "custom-q",
+			kubectlOutput:  "",
+			wantName:       "custom-q",
+			wantDiscovered: false,
+			wantErr:        false,
 		},
 		{
-			name:          "User requested name with resource path",
-			requestedName: "namespaces/default/localQueues/custom-q",
-			kubectlOutput: "",
-			wantName:      "custom-q",
-			wantErr:       false,
+			name:           "User requested name with resource path",
+			requestedName:  "namespaces/default/localQueues/custom-q",
+			kubectlOutput:  "",
+			wantName:       "custom-q",
+			wantDiscovered: false,
+			wantErr:        false,
 		},
 		{
 			name:          "User requested invalid RFC 1123 name (uppercase)",
@@ -206,32 +209,36 @@ func TestResolveKueueQueue(t *testing.T) {
 			wantErr:       true,
 		},
 		{
-			name:          "No queues found, fallback to default",
-			requestedName: "",
-			kubectlOutput: "",
-			wantName:      "default",
-			wantErr:       false,
+			name:           "No queues found, fallback to default",
+			requestedName:  "",
+			kubectlOutput:  "",
+			wantName:       "default",
+			wantDiscovered: false,
+			wantErr:        false,
 		},
 		{
-			name:          "Single queue found, auto-discover",
-			requestedName: "",
-			kubectlOutput: "queue-1",
-			wantName:      "queue-1",
-			wantErr:       false,
+			name:           "Single queue found, auto-discover",
+			requestedName:  "",
+			kubectlOutput:  "queue-1",
+			wantName:       "queue-1",
+			wantDiscovered: true,
+			wantErr:        false,
 		},
 		{
-			name:          "Multiple queues found, prefer default",
-			requestedName: "",
-			kubectlOutput: "multislice-queue default",
-			wantName:      "default",
-			wantErr:       false,
+			name:           "Multiple queues found, prefer default",
+			requestedName:  "",
+			kubectlOutput:  "multislice-queue default",
+			wantName:       "default",
+			wantDiscovered: true,
+			wantErr:        false,
 		},
 		{
-			name:          "Multiple queues found, fallback to multislice-queue",
-			requestedName: "",
-			kubectlOutput: "multislice-queue custom-q",
-			wantName:      "multislice-queue",
-			wantErr:       false,
+			name:           "Multiple queues found, fallback to multislice-queue",
+			requestedName:  "",
+			kubectlOutput:  "multislice-queue custom-q",
+			wantName:       "multislice-queue",
+			wantDiscovered: true,
+			wantErr:        false,
 		},
 		{
 			name:          "Multiple queues found without default or multislice-queue, hard fail",
@@ -252,12 +259,15 @@ func TestResolveKueueQueue(t *testing.T) {
 			mockExec := NewMockExecutor(responses)
 			orc := newTestGKEOrchestrator(mockExec)
 
-			got, err := orc.resolveKueueQueue(tt.requestedName, "default")
+			got, discovered, err := orc.resolveKueueQueue(tt.requestedName, "default")
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("resolveKueueQueue() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if got != tt.wantName {
 				t.Errorf("resolveKueueQueue() got = %v, want %v", got, tt.wantName)
+			}
+			if discovered != tt.wantDiscovered {
+				t.Errorf("resolveKueueQueue() discovered = %v, want %v", discovered, tt.wantDiscovered)
 			}
 		})
 	}
@@ -506,7 +516,7 @@ func TestWaitForKueueWebhook_Success(t *testing.T) {
 			if name == "kubectl" && args[0] == "get" && args[1] == "deployment" {
 				return shell.CommandResult{
 					ExitCode: 0,
-					Stdout:   "registry.k8s.io/kueue/kueue:v0.15.2",
+					Stdout:   `{"spec":{"template":{"spec":{"containers":[{"image":"registry.k8s.io/kueue/kueue:v0.15.2"}]}}}}`,
 				}
 			}
 			if name == "kubectl" && args[0] == "get" && args[1] == "endpointslice" {
@@ -538,7 +548,7 @@ func TestWaitForKueueWebhook_Success_OlderVersion(t *testing.T) {
 			if name == "kubectl" && args[0] == "get" && args[1] == "deployment" {
 				return shell.CommandResult{
 					ExitCode: 0,
-					Stdout:   "registry.k8s.io/kueue/kueue:v0.11.1",
+					Stdout:   `{"spec":{"template":{"spec":{"containers":[{"image":"registry.k8s.io/kueue/kueue:v0.11.1"}]}}}}`,
 				}
 			}
 			if name == "kubectl" && args[0] == "get" && args[1] == "endpoints" {
@@ -605,8 +615,7 @@ func TestCheckAndInstallKueue_ReinstallNeeded_LowVersion(t *testing.T) {
 		{pattern: "kubectl delete crd", action: func() { deleteCalled = true }, res: shell.CommandResult{ExitCode: 0}},
 		{pattern: "auth can-i", res: shell.CommandResult{ExitCode: 0, Stdout: "yes"}},
 		{pattern: "kubectl get crd", res: shell.CommandResult{ExitCode: 0, Stdout: "clusterqueues.kueue.x-k8s.io found"}},
-		{pattern: "jsonpath", res: shell.CommandResult{ExitCode: 0, Stdout: "registry.k8s.io/kueue/kueue:v0.12.0"}},
-		{pattern: "kubectl get deployment", res: shell.CommandResult{ExitCode: 0, Stdout: "kueue-controller-manager found"}},
+		{pattern: "kubectl get deployment", res: shell.CommandResult{ExitCode: 0, Stdout: `{"spec":{"template":{"spec":{"containers":[{"image":"registry.k8s.io/kueue/kueue:v0.12.0"}]}}}}`}},
 		{pattern: "kubectl get endpoints", res: shell.CommandResult{ExitCode: 0, Stdout: `{"subsets": [{"addresses": [{"ip": "10.0.0.1"}]}]}`}},
 		{pattern: "kubectl get endpointslice", res: shell.CommandResult{ExitCode: 0, Stdout: `{"subsets": [{"addresses": [{"ip": "10.0.0.1"}]}]}`}},
 		{pattern: "apply", res: shell.CommandResult{ExitCode: 0}},
@@ -664,9 +673,9 @@ func TestEnsurePriorityClassesInstalled_Missing(t *testing.T) {
 		executor: mock,
 	}
 
-	err := orc.ensurePriorityClassesInstalled()
+	err := orc.EnsurePriorityClassesInstalled()
 	if err != nil {
-		t.Fatalf("ensurePriorityClassesInstalled failed: %v", err)
+		t.Fatalf("EnsurePriorityClassesInstalled failed: %v", err)
 	}
 
 	if !applyCalled {
@@ -694,9 +703,9 @@ func TestEnsurePriorityClassesInstalled_Present(t *testing.T) {
 		executor: mock,
 	}
 
-	err := orc.ensurePriorityClassesInstalled()
+	err := orc.EnsurePriorityClassesInstalled()
 	if err != nil {
-		t.Fatalf("ensurePriorityClassesInstalled failed: %v", err)
+		t.Fatalf("EnsurePriorityClassesInstalled failed: %v", err)
 	}
 
 	if applyCalled {
@@ -773,11 +782,8 @@ func TestCheckAndInstallKueue_PermissionDenied(t *testing.T) {
 			if strings.Contains(fullCmd, "kubectl get crd") {
 				return shell.CommandResult{ExitCode: 0, Stdout: "clusterqueues.kueue.x-k8s.io found"}
 			}
-			if strings.Contains(fullCmd, "jsonpath") {
-				return shell.CommandResult{ExitCode: 0, Stdout: "registry.k8s.io/kueue/kueue:v0.12.0"}
-			}
 			if strings.Contains(fullCmd, "kubectl get deployment") {
-				return shell.CommandResult{ExitCode: 0, Stdout: "kueue-controller-manager found"}
+				return shell.CommandResult{ExitCode: 0, Stdout: `{"spec":{"template":{"spec":{"containers":[{"image":"registry.k8s.io/kueue/kueue:v0.12.0"}]}}}}`}
 			}
 			return shell.CommandResult{ExitCode: 0}
 		},
@@ -813,11 +819,8 @@ func TestCheckAndInstallKueue_PermissionGranted(t *testing.T) {
 			if strings.Contains(fullCmd, "kubectl get crd") {
 				return shell.CommandResult{ExitCode: 0, Stdout: "clusterqueues.kueue.x-k8s.io found"}
 			}
-			if strings.Contains(fullCmd, "jsonpath") {
-				return shell.CommandResult{ExitCode: 0, Stdout: "registry.k8s.io/kueue/kueue:v0.12.0"}
-			}
 			if strings.Contains(fullCmd, "kubectl get deployment") {
-				return shell.CommandResult{ExitCode: 0, Stdout: "kueue-controller-manager found"}
+				return shell.CommandResult{ExitCode: 0, Stdout: `{"spec":{"template":{"spec":{"containers":[{"image":"registry.k8s.io/kueue/kueue:v0.12.0"}]}}}}`}
 			}
 			if strings.Contains(fullCmd, "kubectl get endpoints") || strings.Contains(fullCmd, "kubectl get endpointslice") {
 				return shell.CommandResult{ExitCode: 0, Stdout: `{"subsets": [{"addresses": [{"ip": "10.0.0.1"}]}]}`}
@@ -847,7 +850,7 @@ func TestCheckAndInstallKueue_PermissionGranted(t *testing.T) {
 
 func TestValidatePriorityClass_Empty(t *testing.T) {
 	orc := &GKEOrchestrator{}
-	err := orc.validatePriorityClass("")
+	err := orc.validatePriorityClass("", nil, nil)
 	if err != nil {
 		t.Fatalf("expected no error for empty priority, got %v", err)
 	}
@@ -863,7 +866,8 @@ func TestValidatePriorityClass_Exists(t *testing.T) {
 		},
 	}
 	orc := &GKEOrchestrator{executor: mock}
-	err := orc.validatePriorityClass("medium")
+	existing, listErr := orc.getClusterPriorityClasses()
+	err := orc.validatePriorityClass("medium", existing, listErr)
 	if err != nil {
 		t.Fatalf("expected no error for existing priority, got %v", err)
 	}
@@ -879,7 +883,8 @@ func TestValidatePriorityClass_NotExist(t *testing.T) {
 		},
 	}
 	orc := &GKEOrchestrator{executor: mock}
-	err := orc.validatePriorityClass("medium")
+	existing, listErr := orc.getClusterPriorityClasses()
+	err := orc.validatePriorityClass("medium", existing, listErr)
 	if err == nil {
 		t.Fatal("expected error for non-existing priority, got nil")
 	}
@@ -1046,10 +1051,10 @@ func TestCheckAndInstallKueue_VersionNormalization(t *testing.T) {
 			if strings.Contains(fullCmd, "auth can-i") {
 				return shell.CommandResult{ExitCode: 0, Stdout: "yes"}
 			}
-			if strings.Contains(fullCmd, "jsonpath") {
-				return shell.CommandResult{ExitCode: 0, Stdout: "registry.k8s.io/kueue/kueue:v0.12.0"}
+			if strings.Contains(fullCmd, "kubectl get deployment") {
+				return shell.CommandResult{ExitCode: 0, Stdout: `{"spec":{"template":{"spec":{"containers":[{"image":"registry.k8s.io/kueue/kueue:v0.12.0"}]}}}}`}
 			}
-			if strings.Contains(fullCmd, "kubectl get crd") || strings.Contains(fullCmd, "kubectl get deployment") {
+			if strings.Contains(fullCmd, "kubectl get crd") {
 				return shell.CommandResult{ExitCode: 0, Stdout: "found"}
 			}
 			if strings.Contains(fullCmd, "kubectl get endpoints") || strings.Contains(fullCmd, "kubectl get endpointslice") {
@@ -1082,7 +1087,8 @@ func TestValidatePriorityClass_Forbidden(t *testing.T) {
 	}
 	orc := &GKEOrchestrator{executor: mock}
 
-	err := orc.validatePriorityClass("high")
+	existing, listErr := orc.getClusterPriorityClasses()
+	err := orc.validatePriorityClass("high", existing, listErr)
 	if err != nil {
 		t.Fatalf("validatePriorityClass should succeed and skip on 403 Forbidden, got: %v", err)
 	}
@@ -1258,5 +1264,85 @@ func TestParseKueueQueueName(t *testing.T) {
 				t.Errorf("parseKueueQueueName(%q) = %q, want %q", tt.input, got, tt.wantQueue)
 			}
 		})
+	}
+}
+
+func TestCheckAndInstallKueue_HealthySingleDeploymentRead(t *testing.T) {
+	getDepCalls := 0
+	rolloutCalls := 0
+
+	mock := &mockExecutor{
+		executeCommandFunc: func(name string, args ...string) shell.CommandResult {
+			fullCmd := name + " " + strings.Join(args, " ")
+			if strings.Contains(fullCmd, "kubectl get crd") {
+				return shell.CommandResult{ExitCode: 0, Stdout: "clusterqueues.kueue.x-k8s.io found"}
+			}
+			if strings.Contains(fullCmd, "kubectl get deployment") {
+				getDepCalls++
+				return shell.CommandResult{
+					ExitCode: 0,
+					Stdout:   `{"metadata":{"generation":1},"spec":{"replicas":1,"template":{"spec":{"containers":[{"image":"registry.k8s.io/kueue/kueue:v0.16.1"}]}}},"status":{"observedGeneration":1,"replicas":1,"updatedReplicas":1,"availableReplicas":1}}`,
+				}
+			}
+			if strings.Contains(fullCmd, "kubectl rollout status") {
+				rolloutCalls++
+				return shell.CommandResult{ExitCode: 0}
+			}
+			if strings.Contains(fullCmd, "kubectl get endpointslice") {
+				return shell.CommandResult{
+					ExitCode: 0,
+					Stdout:   `{"items":[{"endpoints":[{"addresses":["10.4.1.3"],"conditions":{"ready":true}}]}]}`,
+				}
+			}
+			return shell.CommandResult{ExitCode: 0}
+		},
+	}
+
+	orc := &GKEOrchestrator{executor: mock}
+	if err := orc.CheckAndInstallKueue("", "test-cluster", "us-central1-a"); err != nil {
+		t.Fatalf("CheckAndInstallKueue failed: %v", err)
+	}
+	if getDepCalls != 1 {
+		t.Errorf("kubectl get deployment calls = %d, want 1", getDepCalls)
+	}
+	if rolloutCalls != 0 {
+		t.Errorf("kubectl rollout status calls = %d, want 0 when deployment is already rolled out", rolloutCalls)
+	}
+}
+
+func TestConfigureClusterEnvironment_AutoDiscoveredQueueSkipsGet(t *testing.T) {
+	listCalls := 0
+	getSingleCalls := 0
+
+	mock := &mockExecutor{
+		executeCommandFunc: func(name string, args ...string) shell.CommandResult {
+			fullCmd := name + " " + strings.Join(args, " ")
+			if fullCmd == "kubectl get localqueue -n default -o jsonpath={.items[*].metadata.name}" {
+				listCalls++
+				return shell.CommandResult{ExitCode: 0, Stdout: "default"}
+			}
+			if strings.HasPrefix(fullCmd, "kubectl get localqueue ") {
+				getSingleCalls++
+				return shell.CommandResult{ExitCode: 0}
+			}
+			return shell.CommandResult{ExitCode: 0}
+		},
+	}
+
+	orc := newTestGKEOrchestrator(mock)
+	job := &orchestrator.JobDefinition{
+		KueueQueueName: "",
+	}
+	if err := orc.configureClusterEnvironment(job); err != nil {
+		t.Fatalf("configureClusterEnvironment failed: %v", err)
+	}
+	if job.KueueQueueName != "default" {
+		t.Errorf("job.KueueQueueName = %q, want %q", job.KueueQueueName, "default")
+	}
+	if listCalls != 1 {
+		t.Errorf("localqueue list calls = %d, want 1", listCalls)
+	}
+	if getSingleCalls != 0 {
+		t.Errorf("localqueue get calls = %d, want 0 when auto-discovered from list", getSingleCalls)
 	}
 }
