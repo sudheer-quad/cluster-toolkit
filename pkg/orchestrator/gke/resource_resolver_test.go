@@ -341,6 +341,316 @@ func TestCalculateResourceLimits_CPU(t *testing.T) {
 	}
 }
 
+func TestCalculateResourceLimits_CPU_LiveNode(t *testing.T) {
+	n2dNodeJSON := `{
+		"items": [
+			{
+				"metadata": {
+					"name": "gke-cluster-system-pool-1",
+					"labels": {
+						"cloud.google.com/gke-nodepool": "default-pool",
+						"node.kubernetes.io/instance-type": "e2-medium"
+					}
+				},
+				"spec": {
+					"taints": [{"key": "components.gke.io/gke-managed-components", "value": "true", "effect": "NoSchedule"}]
+				},
+				"status": {
+					"allocatable": {"cpu": "940m"},
+					"conditions": [{"type": "Ready", "status": "True"}]
+				}
+			},
+			{
+				"metadata": {
+					"name": "gke-cluster-cpu-pool-1",
+					"labels": {
+						"cloud.google.com/gke-nodepool": "cpu-pool",
+						"node.kubernetes.io/instance-type": "n2d-standard-2"
+					}
+				},
+				"status": {
+					"allocatable": {"cpu": "1930m"},
+					"conditions": [{"type": "Ready", "status": "True"}]
+				}
+			}
+		]
+	}`
+
+	daemonSetPodsJSON := `{
+		"items": [
+			{
+				"metadata": {"name": "fluentbit-gke-abc"},
+				"spec": {
+					"nodeName": "gke-cluster-cpu-pool-1",
+					"containers": [
+						{"name": "fluentbit", "resources": {"requests": {"cpu": "100m"}}},
+						{"name": "fluentbit-metrics", "resources": {"requests": {"cpu": "50m"}}}
+					]
+				},
+				"status": {"phase": "Running"}
+			},
+			{
+				"metadata": {"name": "gke-metrics-agent-xyz"},
+				"spec": {
+					"nodeName": "gke-cluster-cpu-pool-1",
+					"initContainers": [
+						{"name": "init-config", "resources": {"requests": {"cpu": "50m"}}},
+						{"name": "otel-sidecar", "restartPolicy": "Always", "resources": {"requests": {"cpu": "100m"}}}
+					],
+					"containers": [
+						{"name": "metrics", "resources": {"requests": {"cpu": "150m"}}}
+					]
+				},
+				"status": {"phase": "Running"}
+			},
+			{
+				"metadata": {"name": "kube-proxy-node-1"},
+				"spec": {
+					"nodeName": "gke-cluster-cpu-pool-1",
+					"containers": [
+						{"name": "kube-proxy", "resources": {"limits": {"cpu": "100m"}}}
+					]
+				},
+				"status": {"phase": "Running"}
+			},
+			{
+				"metadata": {"name": "completed-pod"},
+				"spec": {
+					"nodeName": "gke-cluster-cpu-pool-1",
+					"containers": [
+						{"name": "done", "resources": {"requests": {"cpu": "900m"}}}
+					]
+				},
+				"status": {"phase": "Succeeded"}
+			},
+			{
+				"metadata": {
+					"name": "previous-job-pod",
+					"labels": {"gcluster.google.com/workload": "prev-job"}
+				},
+				"spec": {
+					"nodeName": "gke-cluster-cpu-pool-1",
+					"containers": [
+						{"name": "workload-container", "resources": {"limits": {"cpu": "1000m"}}}
+					]
+				},
+				"status": {"phase": "Running"}
+			}
+		]
+	}`
+
+	tests := []struct {
+		name          string
+		opts          ManifestOptions
+		capacityCount int
+		nodePools     []gkeJobNodePool
+		mockResponses map[string][]shell.CommandResult
+		wantCPU       string
+	}{
+		{
+			name: "Live node without GCS mounts sizes from allocatable minus DaemonSets",
+			opts: ManifestOptions{
+				ComputeType: "n2d-standard-2",
+				MachineType: "n2d-standard-2",
+			},
+			capacityCount: 2,
+			nodePools: []gkeJobNodePool{
+				{Name: "default-pool", Config: gkeNodePoolConfig{MachineType: "e2-medium", Taints: []gkeTaint{{Key: "components.gke.io/gke-managed-components", Value: "true"}}}},
+				{Name: "cpu-pool", Config: gkeNodePoolConfig{MachineType: "n2d-standard-2"}},
+			},
+			mockResponses: map[string][]shell.CommandResult{
+				"kubectl get nodes -o json": {{ExitCode: 0, Stdout: n2dNodeJSON}},
+				"kubectl get pods --all-namespaces --field-selector=spec.nodeName=gke-cluster-cpu-pool-1 -o json": {{ExitCode: 0, Stdout: daemonSetPodsJSON}},
+			},
+			// 1930m - (150m + 250m + 100m) = 1430m
+			wantCPU: "1430m",
+		},
+		{
+			name: "Live node with GCS mounts subtracts 250m gcsfuse sidecar request",
+			opts: ManifestOptions{
+				ComputeType:    "n2d-standard-2",
+				MachineType:    "n2d-standard-2",
+				GCSFuseEnabled: true,
+			},
+			capacityCount: 2,
+			nodePools: []gkeJobNodePool{
+				{Name: "cpu-pool", Config: gkeNodePoolConfig{MachineType: "n2d-standard-2"}},
+			},
+			mockResponses: map[string][]shell.CommandResult{
+				"kubectl get nodes -o json": {{ExitCode: 0, Stdout: n2dNodeJSON}},
+				"kubectl get pods --all-namespaces --field-selector=spec.nodeName=gke-cluster-cpu-pool-1 -o json": {{ExitCode: 0, Stdout: daemonSetPodsJSON}},
+			},
+			// 1930m - 500m - 250m = 1180m
+			wantCPU: "1180m",
+		},
+		{
+			name: "Pool scaled to zero (only system pool node live) falls back to 95% rule",
+			opts: ManifestOptions{
+				ComputeType:    "n2d-standard-2",
+				MachineType:    "n2d-standard-2",
+				GCSFuseEnabled: true,
+			},
+			capacityCount: 2,
+			nodePools: []gkeJobNodePool{
+				{Name: "default-pool", Config: gkeNodePoolConfig{MachineType: "e2-medium", Taints: []gkeTaint{{Key: "components.gke.io/gke-managed-components", Value: "true"}}}},
+				{Name: "cpu-pool", Config: gkeNodePoolConfig{MachineType: "n2d-standard-2"}},
+			},
+			mockResponses: map[string][]shell.CommandResult{
+				"kubectl get nodes -o json": {{ExitCode: 0, Stdout: `{
+					"items": [
+						{
+							"metadata": {
+								"name": "gke-cluster-system-pool-1",
+								"labels": {
+									"cloud.google.com/gke-nodepool": "default-pool",
+									"node.kubernetes.io/instance-type": "e2-medium"
+								}
+							},
+							"status": {
+								"allocatable": {"cpu": "940m"},
+								"conditions": [{"type": "Ready", "status": "True"}]
+							}
+						}
+					]
+				}`}},
+			},
+			wantCPU: "1",
+		},
+		{
+			name: "kubectl get nodes failure falls back to 95% rule",
+			opts: ManifestOptions{
+				ComputeType: "n2-standard-32",
+				MachineType: "n2-standard-32",
+			},
+			capacityCount: 32,
+			mockResponses: map[string][]shell.CommandResult{
+				"kubectl get nodes -o json": {{ExitCode: 1, Stderr: "connection refused"}},
+			},
+			wantCPU: "30",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockExec := NewMockExecutor(tt.mockResponses)
+			g := newTestGKEOrchestrator(mockExec)
+			g.clusterDesc.NodePools = tt.nodePools
+			profile := JobProfile{
+				IsCPUMachine:  true,
+				CapacityCount: tt.capacityCount,
+			}
+
+			cpu, mem, gpu, tpu, err := g.calculateResourceLimits(tt.opts, profile)
+			if err != nil {
+				t.Fatalf("calculateResourceLimits failed: %v", err)
+			}
+			if cpu != tt.wantCPU {
+				t.Errorf("cpu = %q, want %q", cpu, tt.wantCPU)
+			}
+			if mem != "" || gpu != "" || tpu != "" {
+				t.Errorf("mem, gpu, tpu = %q, %q, %q; want empty strings", mem, gpu, tpu)
+			}
+		})
+	}
+}
+
+func TestPrepareAndGenerateGKEManifest_CPU_LiveNodeWithGCSFuse(t *testing.T) {
+	setupMockMachineConfig(t)
+
+	nodeJSON := `{
+		"items": [
+			{
+				"metadata": {
+					"name": "gke-n2-node-1",
+					"labels": {
+						"cloud.google.com/gke-nodepool": "cpu-pool",
+						"node.kubernetes.io/instance-type": "n2-standard-2"
+					}
+				},
+				"status": {
+					"allocatable": {"cpu": "1930m"},
+					"conditions": [{"type": "Ready", "status": "True"}]
+				}
+			}
+		]
+	}`
+	podsJSON := `{
+		"items": [
+			{
+				"metadata": {"name": "daemonset-pod-1"},
+				"spec": {
+					"nodeName": "gke-n2-node-1",
+					"containers": [
+						{"name": "ds", "resources": {"requests": {"cpu": "800m"}}}
+					]
+				},
+				"status": {"phase": "Running"}
+			}
+		]
+	}`
+
+	for _, mountSpec := range []string{
+		"gs://my-bucket;/mnt/gcs;ro",
+		"gs://my-bucket;/mnt/gcs;ro;profile=training",
+	} {
+		t.Run(mountSpec, func(t *testing.T) {
+			// Provide exactly 1 response for kubectl get nodes and 1 for kubectl get pods
+			// to verify cost is at most one node list and one pod list per submit.
+			mockResponses := map[string][]shell.CommandResult{
+				"gcloud compute machine-types describe n2-standard-2 --zone=us-central1-a --format=json": {{ExitCode: 0, Stdout: `{"guestCpus": 2}`}},
+				"kubectl get pv":            {{ExitCode: 0, Stdout: ""}},
+				"kubectl get nodes -o json": {{ExitCode: 0, Stdout: nodeJSON}},
+				"kubectl get pods --all-namespaces --field-selector=spec.nodeName=gke-n2-node-1 -o json": {{ExitCode: 0, Stdout: podsJSON}},
+			}
+			mockExec := NewMockExecutor(mockResponses)
+			orc := newTestGKEOrchestrator(mockExec)
+			orc.projectID = "mock-project"
+			orc.clusterZones = []string{"us-central1-a"}
+			orc.clusterDesc.NodePools = []gkeJobNodePool{
+				{Name: "cpu-pool", Config: gkeNodePoolConfig{MachineType: "n2-standard-2"}},
+			}
+
+			job := orchestrator.JobDefinition{
+				WorkloadName:    "cpu-gcs-job",
+				CommandToRun:    "echo hello",
+				ComputeType:     "n2-standard-2",
+				ClusterLocation: "us-central1-a",
+				ProjectID:       "mock-project",
+				RawMounts:       []string{mountSpec},
+			}
+
+			profile, isDyn, isStat, err := orc.resolveHardwareRequirements(&job)
+			if err != nil {
+				t.Fatalf("resolveHardwareRequirements failed: %v", err)
+			}
+
+			opts, err := orc.PrepareManifestOptions(job, "test-image:latest", profile, isDyn, isStat)
+			if err != nil {
+				t.Fatalf("PrepareManifestOptions failed: %v", err)
+			}
+			if !opts.GCSFuseEnabled {
+				t.Fatalf("expected opts.GCSFuseEnabled to be true")
+			}
+
+			manifest, err := orc.GenerateGKEManifest(opts, profile)
+			if err != nil {
+				t.Fatalf("GenerateGKEManifest failed: %v", err)
+			}
+
+			// 1930m allocatable - 800m DaemonSets - 250m gcsfuse sidecar = 880m
+			if !strings.Contains(manifest, "cpu: 880m") {
+				t.Errorf("expected manifest to contain 'cpu: 880m', got:\n%s", manifest)
+			}
+			if gotNodesCalls := mockExec.callCount["kubectl get nodes -o json"]; gotNodesCalls != 1 {
+				t.Errorf("kubectl get nodes -o json call count = %d, want 1", gotNodesCalls)
+			}
+			if gotPodsCalls := mockExec.callCount["kubectl get pods --all-namespaces --field-selector=spec.nodeName=gke-n2-node-1 -o json"]; gotPodsCalls != 1 {
+				t.Errorf("kubectl get pods call count = %d, want 1", gotPodsCalls)
+			}
+		})
+	}
+}
+
 type MockMachineTypeClient struct {
 	FailAll  bool
 	MT       *compute.MachineType

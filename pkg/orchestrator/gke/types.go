@@ -186,6 +186,7 @@ type GKEOrchestrator struct {
 	staticSlicingCache          map[string]bool
 	topologyCache               map[string]string
 	resourcePolicyCache         map[string]*GCEWorkloadPolicy
+	cpuNodeAvailMillisCache     map[string]int64
 	slicingTopologiesChecked    bool
 	slicingTopologiesDetected   bool
 	gkeCustomTemplatesPath      string
@@ -652,6 +653,7 @@ type kubernetesNodeList struct {
 
 type kubernetesNode struct {
 	Metadata kubernetesNodeMetadata `json:"metadata"`
+	Spec     kubernetesNodeSpec     `json:"spec"`
 	Status   kubernetesNodeStatus   `json:"status"`
 }
 
@@ -660,13 +662,50 @@ type kubernetesNodeMetadata struct {
 	Labels map[string]string `json:"labels"`
 }
 
+type kubernetesNodeSpec struct {
+	Unschedulable bool       `json:"unschedulable"`
+	Taints        []gkeTaint `json:"taints"`
+}
+
 type kubernetesNodeStatus struct {
-	Conditions []kubernetesNodeCondition `json:"conditions"`
+	Allocatable map[string]string         `json:"allocatable"`
+	Conditions  []kubernetesNodeCondition `json:"conditions"`
 }
 
 type kubernetesNodeCondition struct {
 	Type   string `json:"type"`
 	Status string `json:"status"`
+}
+
+// Types for parsing kubectl get pods -o json
+
+type kubernetesPodList struct {
+	Items []kubernetesPod `json:"items"`
+}
+
+type kubernetesPod struct {
+	Metadata struct {
+		Name   string            `json:"name"`
+		Labels map[string]string `json:"labels"`
+	} `json:"metadata"`
+	Spec struct {
+		NodeName       string                `json:"nodeName"`
+		Containers     []kubernetesContainer `json:"containers"`
+		InitContainers []kubernetesContainer `json:"initContainers"`
+		Overhead       map[string]string     `json:"overhead"`
+	} `json:"spec"`
+	Status struct {
+		Phase string `json:"phase"`
+	} `json:"status"`
+}
+
+type kubernetesContainer struct {
+	Name          string `json:"name"`
+	RestartPolicy string `json:"restartPolicy"`
+	Resources     struct {
+		Requests map[string]string `json:"requests"`
+		Limits   map[string]string `json:"limits"`
+	} `json:"resources"`
 }
 
 type kueueWorkloadCondition struct {

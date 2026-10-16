@@ -102,6 +102,7 @@ func newTestGKEOrchestrator(executor Executor) *GKEOrchestrator {
 		dynamicSlicingCache:      make(map[string]bool),
 		staticSlicingCache:       make(map[string]bool),
 		resourcePolicyCache:      make(map[string]*GCEWorkloadPolicy),
+		cpuNodeAvailMillisCache:  make(map[string]int64),
 		// Never read the developer's real kubeconfig in unit tests.
 		kubeconfigLoader: func() (*clientcmdapi.Config, error) { return clientcmdapi.NewConfig(), nil },
 	}

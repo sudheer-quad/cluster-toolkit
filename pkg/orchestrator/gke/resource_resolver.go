@@ -26,7 +26,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+const gcsFuseSidecarCPUMillis int64 = 250
 
 type MachineTypeCap struct {
 	Accelerators []struct {
@@ -423,6 +427,9 @@ func (g *GKEOrchestrator) hasSlicingTopologies() bool {
 
 func (g *GKEOrchestrator) calculateResourceLimits(opts ManifestOptions, profile JobProfile) (cpu, mem, gpu, tpu string, err error) {
 	if profile.IsCPUMachine {
+		if cpuLim := g.resolveCPULimitFromLiveNode(opts); cpuLim != "" {
+			return cpuLim, "", "", "", nil
+		}
 		logging.Info("Using cached capacity for CPU machine %s during limits calculation: %d", opts.ComputeType, profile.CapacityCount)
 		offsetVCPUs := max(1, int(float64(profile.CapacityCount)*0.95))
 		return fmt.Sprintf("%d", offsetVCPUs), "", "", "", nil
@@ -812,6 +819,9 @@ func (g *GKEOrchestrator) resolveResourcesAndGates(opts *ManifestOptions, isCPUM
 	} else {
 		if opts.ComputeType != "" && gpuLimit == "" && tpuLimit == "" {
 			logging.Info("Suppressing nodeSelector label for deduced CPU machine %s", opts.ComputeType)
+			if opts.MachineType == "" {
+				opts.MachineType = opts.ComputeType
+			}
 			opts.ComputeType = ""
 		}
 		resStr, err := g.buildResourcesString(cpuLimit, memoryLimit, gpuLimit, tpuLimit, 16)
@@ -822,4 +832,233 @@ func (g *GKEOrchestrator) resolveResourcesAndGates(opts *ManifestOptions, isCPUM
 	}
 
 	return profile, nil
+}
+
+func (g *GKEOrchestrator) resolveCPULimitFromLiveNode(opts ManifestOptions) string {
+	machineType := opts.MachineType
+	if machineType == "" {
+		machineType = opts.ComputeType
+	}
+
+	availMillis, ok := g.queryNodeAvailableCPUMillis(machineType)
+	if !ok || availMillis <= 0 {
+		return ""
+	}
+
+	if opts.GCSFuseEnabled {
+		availMillis -= gcsFuseSidecarCPUMillis
+	}
+	if availMillis <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%dm", availMillis)
+}
+
+func (g *GKEOrchestrator) queryNodeAvailableCPUMillis(machineType string) (int64, bool) {
+	cacheKey := strings.ToLower(strings.TrimSpace(machineType))
+	if g.cpuNodeAvailMillisCache != nil {
+		if val, found := g.cpuNodeAvailMillisCache[cacheKey]; found {
+			return val, val > 0
+		}
+	} else {
+		g.cpuNodeAvailMillisCache = make(map[string]int64)
+	}
+
+	if g.executor == nil {
+		g.cpuNodeAvailMillisCache[cacheKey] = -1
+		return 0, false
+	}
+
+	nodeList, err := fetchNodeList(g.executor)
+	if err != nil || nodeList == nil || len(nodeList.Items) == 0 {
+		g.cpuNodeAvailMillisCache[cacheKey] = -1
+		return 0, false
+	}
+
+	node, allocatableMillis, found := g.selectTargetPoolNode(nodeList.Items, machineType)
+	if !found || allocatableMillis <= 0 {
+		g.cpuNodeAvailMillisCache[cacheKey] = -1
+		return 0, false
+	}
+
+	podRes := g.executor.ExecuteCommand("kubectl", "get", "pods", "--all-namespaces", "--field-selector=spec.nodeName="+node.Metadata.Name, "-o", "json")
+	if podRes.ExitCode != 0 {
+		g.cpuNodeAvailMillisCache[cacheKey] = -1
+		return 0, false
+	}
+
+	var podList kubernetesPodList
+	if err := json.Unmarshal([]byte(podRes.Stdout), &podList); err != nil {
+		g.cpuNodeAvailMillisCache[cacheKey] = -1
+		return 0, false
+	}
+
+	var requestedMillis int64
+	for _, pod := range podList.Items {
+		if pod.Spec.NodeName != "" && pod.Spec.NodeName != node.Metadata.Name {
+			continue
+		}
+		if isTerminatedOrWorkloadPod(pod) {
+			continue
+		}
+		requestedMillis += podCPURequestMillis(pod)
+	}
+
+	availMillis := allocatableMillis - requestedMillis
+	if availMillis <= 0 {
+		g.cpuNodeAvailMillisCache[cacheKey] = -1
+		return 0, false
+	}
+
+	logging.Info("Sized CPU limit from live node %s (%s): allocatable=%dm, requested=%dm, available=%dm",
+		node.Metadata.Name, machineType, allocatableMillis, requestedMillis, availMillis)
+	g.cpuNodeAvailMillisCache[cacheKey] = availMillis
+	return availMillis, true
+}
+
+func (g *GKEOrchestrator) selectTargetPoolNode(nodes []kubernetesNode, machineType string) (kubernetesNode, int64, bool) {
+	targetPools := make(map[string]bool)
+	nonTargetPools := make(map[string]bool)
+	for _, np := range g.clusterDesc.NodePools {
+		if np.Name == "" {
+			continue
+		}
+		if g.isSystemPool(np) {
+			nonTargetPools[np.Name] = true
+			continue
+		}
+		if machineType != "" && strings.EqualFold(np.Config.MachineType, machineType) {
+			targetPools[np.Name] = true
+		} else if np.Config.MachineType != "" {
+			nonTargetPools[np.Name] = true
+		}
+	}
+
+	var fallbackNode kubernetesNode
+	var fallbackAlloc int64
+	hasFallback := false
+
+	for _, node := range nodes {
+		if !isSchedulableReadyNode(node) {
+			continue
+		}
+		allocMillis, ok := parseCPUMillis(node.Status.Allocatable["cpu"])
+		if !ok || allocMillis <= 0 {
+			continue
+		}
+
+		poolName := node.Metadata.Labels[nodePoolLabel]
+		if poolName != "" && nonTargetPools[poolName] {
+			continue
+		}
+		instType := node.Metadata.Labels["node.kubernetes.io/instance-type"]
+		if instType == "" {
+			instType = node.Metadata.Labels["beta.kubernetes.io/instance-type"]
+		}
+
+		if machineType != "" {
+			if instType != "" && !strings.EqualFold(instType, machineType) {
+				continue
+			}
+			if (instType != "" && strings.EqualFold(instType, machineType)) || (poolName != "" && targetPools[poolName]) {
+				return node, allocMillis, true
+			}
+			if instType == "" && len(targetPools) == 0 && len(g.clusterDesc.NodePools) == 0 && !hasFallback {
+				fallbackNode = node
+				fallbackAlloc = allocMillis
+				hasFallback = true
+			}
+			continue
+		}
+		return node, allocMillis, true
+	}
+
+	if hasFallback {
+		return fallbackNode, fallbackAlloc, true
+	}
+	return kubernetesNode{}, 0, false
+}
+
+func isSchedulableReadyNode(node kubernetesNode) bool {
+	if node.Metadata.Name == "" || node.Spec.Unschedulable {
+		return false
+	}
+	for _, taint := range node.Spec.Taints {
+		if taint.Key == "components.gke.io/gke-managed-components" && taint.Value == "true" {
+			return false
+		}
+	}
+	if len(node.Status.Conditions) == 0 {
+		return true
+	}
+	for _, cond := range node.Status.Conditions {
+		if cond.Type == "Ready" {
+			return cond.Status == "True"
+		}
+	}
+	return true
+}
+
+func isTerminatedOrWorkloadPod(pod kubernetesPod) bool {
+	if pod.Status.Phase == "Succeeded" || pod.Status.Phase == "Failed" {
+		return true
+	}
+	if pod.Metadata.Labels["gcluster.google.com/workload"] != "" ||
+		pod.Metadata.Labels["jobset.sigs.k8s.io/jobset-name"] != "" {
+		return true
+	}
+	return false
+}
+
+func parseCPUMillis(val string) (int64, bool) {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return 0, false
+	}
+	q, err := resource.ParseQuantity(val)
+	if err != nil {
+		return 0, false
+	}
+	return q.MilliValue(), true
+}
+
+func containerCPURequestMillis(c kubernetesContainer) int64 {
+	if m, ok := parseCPUMillis(c.Resources.Requests["cpu"]); ok {
+		return m
+	}
+	if m, ok := parseCPUMillis(c.Resources.Limits["cpu"]); ok {
+		return m
+	}
+	return 0
+}
+
+func podCPURequestMillis(pod kubernetesPod) int64 {
+	var regularMillis int64
+	for _, c := range pod.Spec.Containers {
+		regularMillis += containerCPURequestMillis(c)
+	}
+
+	var sidecarMillis int64
+	var maxInitMillis int64
+	for _, ic := range pod.Spec.InitContainers {
+		icMillis := containerCPURequestMillis(ic)
+		if ic.RestartPolicy == "Always" {
+			sidecarMillis += icMillis
+			if sidecarMillis > maxInitMillis {
+				maxInitMillis = sidecarMillis
+			}
+		} else if sidecarMillis+icMillis > maxInitMillis {
+			maxInitMillis = sidecarMillis + icMillis
+		}
+	}
+
+	effectiveMillis := sidecarMillis + regularMillis
+	if maxInitMillis > effectiveMillis {
+		effectiveMillis = maxInitMillis
+	}
+
+	if overheadMillis, ok := parseCPUMillis(pod.Spec.Overhead["cpu"]); ok && overheadMillis > 0 {
+		effectiveMillis += overheadMillis
+	}
+	return effectiveMillis
 }
