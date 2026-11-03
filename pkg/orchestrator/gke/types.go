@@ -42,6 +42,10 @@ const (
 	tpuTopologyLabel = "cloud.google.com/gke-tpu-topology"
 	// nodePoolLabel is the GKE label for the node pool name.
 	nodePoolLabel = "cloud.google.com/gke-nodepool"
+	// placementPolicyNameLabel selects nodes carrying a named GCE compact placement or workload policy.
+	placementPolicyNameLabel = "cloud.google.com/placement-policy-name"
+	// placementGroupLabel is the GKE-managed compact placement group identifier used by NAP.
+	placementGroupLabel = "cloud.google.com/gke-placement-group"
 	// multitierCheckpointCSIDriver is the CSI driver for Multi-Tier Checkpointing (MTC).
 	multitierCheckpointCSIDriver = "multitier-checkpoint.csi.storage.gke.io"
 )
@@ -606,6 +610,7 @@ type jobSetTemplateData struct {
 	NumSlices                     int
 	NodesPerSlice                 int
 	WorkerBackoffLimit            int
+	WorkerBackoffLimitPerIndex    int
 	PathwaysInstanceType          string
 	CommandToRun                  string
 	ResourcesString               string
@@ -707,6 +712,35 @@ type kueueWorkload struct {
 
 type kueueWorkloadList struct {
 	Items []kueueWorkload `json:"items"`
+}
+
+type kueueDeployment struct {
+	Metadata struct {
+		Generation int64 `json:"generation"`
+	} `json:"metadata"`
+	Spec struct {
+		Replicas *int32 `json:"replicas"`
+		Paused   bool   `json:"paused"`
+		Template struct {
+			Spec struct {
+				Containers []struct {
+					Name  string `json:"name"`
+					Image string `json:"image"`
+				} `json:"containers"`
+			} `json:"spec"`
+		} `json:"template"`
+	} `json:"spec"`
+	Status struct {
+		ObservedGeneration int64 `json:"observedGeneration"`
+		Replicas           int32 `json:"replicas"`
+		UpdatedReplicas    int32 `json:"updatedReplicas"`
+		AvailableReplicas  int32 `json:"availableReplicas"`
+		Conditions         []struct {
+			Type   string `json:"type"`
+			Status string `json:"status"`
+			Reason string `json:"reason"`
+		} `json:"conditions"`
+	} `json:"status"`
 }
 
 // parsedReservation holds the extracted components of a GCE reservation URI/path.
