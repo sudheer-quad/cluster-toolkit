@@ -665,8 +665,8 @@ resource "google_container_node_pool" "cpu_np" {
   version        = local.master_version
 
   autoscaling {
-    total_min_node_count = 0
-    total_max_node_count = 100
+    total_min_node_count = var.pathways_cpu_node_pool_total_min_nodes
+    total_max_node_count = var.pathways_cpu_node_pool_total_max_nodes
   }
 
   management {
@@ -678,7 +678,7 @@ resource "google_container_node_pool" "cpu_np" {
     resource_labels = local.labels
     service_account = var.service_account_email
     oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
-    machine_type    = "n4-standard-64"
+    machine_type    = var.pathways_cpu_node_pool_machine_type
     image_type      = var.system_node_pool_image_type
 
     shielded_instance_config {
@@ -711,6 +711,11 @@ resource "google_container_node_pool" "cpu_np" {
       node_config[0].resource_labels,
       version,
     ]
+
+    precondition {
+      condition     = var.pathways_cpu_node_pool_total_max_nodes >= var.pathways_cpu_node_pool_total_min_nodes
+      error_message = "pathways_cpu_node_pool_total_max_nodes must be greater than or equal to pathways_cpu_node_pool_total_min_nodes."
+    }
   }
 }
 

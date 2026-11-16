@@ -654,9 +654,45 @@ variable "auto_monitoring_scope" {
 }
 
 variable "enable_pathways_for_tpus" {
-  description = "If true, conditionally deploys a dedicated CPU node pool (cpu-np) using n4-standard-64 instances."
+  description = "If true, conditionally deploys a dedicated CPU node pool (cpu-np) for Pathways workloads."
   type        = bool
   default     = false
+}
+
+variable "pathways_cpu_node_pool_machine_type" {
+  description = "Machine type for the dedicated Pathways CPU node pool (cpu-np). Defaults to n2-standard-64."
+  type        = string
+  default     = "n2-standard-64"
+  nullable    = false
+
+  validation {
+    condition     = length(trimspace(var.pathways_cpu_node_pool_machine_type)) > 0
+    error_message = "pathways_cpu_node_pool_machine_type must not be empty."
+  }
+}
+
+variable "pathways_cpu_node_pool_total_min_nodes" {
+  description = "Minimum total number of nodes in the dedicated Pathways CPU node pool (cpu-np) across all zones. Defaults to 1 to avoid scale-from-zero delays and autoscaler issues."
+  type        = number
+  default     = 1
+  nullable    = false
+
+  validation {
+    condition     = var.pathways_cpu_node_pool_total_min_nodes >= 0
+    error_message = "pathways_cpu_node_pool_total_min_nodes must be greater than or equal to 0."
+  }
+}
+
+variable "pathways_cpu_node_pool_total_max_nodes" {
+  description = "Maximum total number of nodes in the dedicated Pathways CPU node pool (cpu-np) across all zones."
+  type        = number
+  default     = 100
+  nullable    = false
+
+  validation {
+    condition     = var.pathways_cpu_node_pool_total_max_nodes >= 1
+    error_message = "pathways_cpu_node_pool_total_max_nodes must be greater than or equal to 1."
+  }
 }
 
 variable "enable_vertical_pod_autoscaling" {
